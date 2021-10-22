@@ -1,6 +1,6 @@
 - 👋 Hi, I’m @Darsh
-- 🌱 I’m currently learning to become a good programmer
-- 💞️ I’m looking to collaborate with people and participate in hackathons
+- 🌱 I’m currently learning to become good at programming
+- 💞️ I’m looking to collaborate with people and work on interesting projects
 - 📫 You can reach out to me at shahdarsh855@gmail.com
 
 <!---
