@@ -1,0 +1,82 @@
+---
+title: "Predicting Absenteeism"
+output: html_notebook
+---
+
+```{r}
+Absenteeism = read.csv("C:\\Users\\Darsh\\Desktop\\Georgia Tech\\MGT 6203\\Group Project\\Absenteeism_at_work.csv", sep = ';')
+head(Absenteeism)
+
+```
+```{r}
+
+RFA_Unique = order(unique(Absenteeism$Reason.for.absence))
+RFA_Unique[order(RFA_Unique)] #easy to find if there is a missing value
+
+```
+
+```{r}
+
+install.packages('fastDummies')
+library('fastDummies')
+
+```
+
+```{r}
+
+RFA_Col_Select = Absenteeism['Reason.for.absence']
+RFA_Col = dummy_cols(RFA_Col_Select, select_columns = 'Reason.for.absence') #creating separate df for dummies
+RFA_dummies = subset(RFA_Col, select = -c(Reason.for.absence)) #dropping reason for absence column so we have 28 dummy columns
+nrow(RFA_dummies[1]) #checking num of rows are 740
+
+```
+```{r}
+
+install.packages('matrixStats')
+library('matrixStats')
+
+```
+```{r}
+
+reason_type_1 = rowMaxs(as.matrix(RFA_dummies[, c(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14)])) #Diseases
+reason_type_2 = rowMaxs(as.matrix(RFA_dummies[, c(15,16,17)])) #Pregnancy/birth related
+reason_type_3 = rowMaxs(as.matrix(RFA_dummies[, c(18,19,20,21)])) #Signs not categorized
+reason_type_4 = rowMaxs(as.matrix(RFA_dummies[, c(22,23,24,25,26,27,28)])) #light reason for absence
+reazon_for_abs = data.frame(reason_type_1, reason_type_2, reason_type_3, reason_type_4) #merging above 4 vectors to a dataframe
+
+```
+
+```{r}
+
+final_df_1 = cbind(Absenteeism, reazon_for_abs) #merging main df and dummy df
+apply(final_df_1["Absenteeism.time.in.hours"], 2, mean) #median of Absenteeism.time.in.hours column
+#since median is 3, anyone who is moderately absent will have absence time <=3(0) and >3(1) will be deemed excessively absent
+unique(final_df_1$Absenteeism.time.in.hours)
+
+```
+```{r}
+hist(final_df_1$Absenteeism.time.in.hours)
+```
+
+```{r}
+
+#head(final_df_1)
+final_df_1$Seasons = factor(final_df_1$Seasons)
+str(final_df_1)
+
+```
+
+```{r}
+
+library(dplyr)
+Reg_model = lm(Absenteeism.time.in.hours ~ reason_type_1 + reason_type_2 + reason_type_3 + reason_type_4 + Seasons + Transportation.expense + Distance.from.Residence.to.Work + Age + Work.load.Average.day + Body.mass.index + Education + Son +  Pet, data = final_df_1)
+
+Reg_model_summary = summary(Reg_model)
+Reg_model_summary
+
+```
+
+```{r}
+coefficients = as.data.frame(Reg_model_summary$coefficients)
+coefficients[-1,] %>% filter(`Pr(>|t|)`<= 0.10) %>% arrange(desc(abs(Estimate))) %>% head(10)
+```
