@@ -1,0 +1,189 @@
+---
+title: ''
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r}
+library(dplyr)
+```
+
+```{r}
+df <- read.csv("ny.csv")
+```
+
+```{r}
+plot(sort(df$WAGP))
+```
+
+```{r}
+hist(df$WAGP)
+```
+
+
+```{r}
+table(df$NOC)
+```
+Drop rows with NOC = -1 
+
+```{r}
+counts_wkhp <- table(df$WKHP)
+barplot(counts_wkhp,xlab="Hours Worked per Week")
+```
+
+Create categories for part time [0, 35) full time [35-50] and overtime (50+)
+
+```{r}
+sum(df$WKHP < 35) / nrow(df) * 100
+sum(df$WKHP >= 35 & df$WKHP <= 50) / nrow(df) * 100
+sum(df$WKHP > 50) / nrow(df) * 100
+```
+
+```{r}
+# "b" housing tenure - N/A
+table(df$TEN)
+```
+
+Drop rows with TEN = b
+
+```{r}
+# "b" vehicles - N/A
+table(df$VEH)
+```
+Drop rows with VEH = b
+
+```{r}
+# HH presence and age of children "b" N/A, "4" no children "1" only < 6, "2" only 6-17, "3" both 1 and 2
+table(df$HUPAOC)
+```
+
+drop rows with HUPAOC = b
+
+```{r}
+table(df$WIF)
+sum(df$WIF == "b") / nrow(df) * 100
+```
+
+Missing value is a considerable portion of data -> drop variable for now
+in the future, possible to split into binary category (has_WIF) with values
+
+```{r}
+# drop since COW was already filtered
+# table(df$COW)
+```
+
+```{r}
+# remap "b" to no
+table(df$FER)
+```
+
+```{r}
+df %>%
+  mutate(Absent = ifelse(ESR == 2, 1, 0)) %>%
+  mutate(NonAbsent = ifelse(ESR == 1, 1, 0)) %>%
+  mutate(Absent.Weighted = ifelse(ESR == 2, 1, 0) * PWGTP) %>%
+  mutate(NonAbsent.Weighted = ifelse(ESR == 1, 1, 0) * PWGTP) %>%
+  mutate(Absent.Weighted.log = ifelse(ESR == 2, 1, 0) * ceiling(log(PWGTP))) %>%
+  group_by(NAICS) %>%
+  summarise(
+    Percent.Unweighted = sum(Absent) / (sum(Absent) + sum(NonAbsent)) * 100,
+    Percent.Weighted = sum(Absent.Weighted) / (sum(Absent.Weighted) + sum(NonAbsent.Weighted)) * 100,
+    Percent.Oversample = sum(Absent.Weighted) / (sum(Absent.Weighted) + sum(NonAbsent)) * 100,
+    Percent.Oversample.log = sum(Absent.Weighted.log) / (sum(Absent.Weighted.log) + sum(NonAbsent)) * 100
+    )
+```
+
+```{r}
+df_clean <- df %>%
+  select(-grep("PWGTP\\d", colnames(df))) %>%  # drop extra weight columns
+  select(-ends_with("_label")) %>%  # drop labels
+  select(-c("WGTP", "OCCP", "WKWN", "JWTRNS", "ST", "RT", "NAICSP")) %>%
+  filter(NOC != -1) %>%
+  mutate(WKHP.PartTime = ifelse(WKHP < 35, 1, 0)) %>%
+  mutate(WKHP.FullTime = ifelse(WKHP >= 35 & WKHP <= 50, 1, 0)) %>%
+  mutate(WKHP.OverTime = ifelse(WKHP > 50, 1, 0)) %>%
+  filter(TEN != -1) %>%
+  mutate(TEN.OwnLoan = ifelse(TEN == 1, 1, 0)) %>%
+  mutate(TEN.Own = ifelse(TEN == 2, 1, 0)) %>%
+  mutate(TEN.Rent = ifelse(TEN == 3, 1, 0)) %>%
+  mutate(TEN.NoPay = ifelse(TEN == 4, 1, 0)) %>%
+  filter(VEH != "b") %>%
+  mutate_at("VEH", as.integer) %>%
+  filter(HUPAOC != "b") %>%
+  mutate(HUPAOC.UnderSix = ifelse(HUPAOC == 1, 1, 0)) %>%
+  mutate(HUPAOC.OverSix = ifelse(HUPAOC == 2, 1, 0)) %>%
+  mutate(HUPAOC.Both = ifelse(HUPAOC == 3, 1, 0)) %>%
+  mutate(HUPAOC.None = ifelse(HUPAOC == 4, 1, 0)) %>%
+  mutate(FER = ifelse(FER == 1, 1, 0)) %>%
+  mutate(HINS1 = ifelse(HINS1 == 1, 1, 0)) %>%
+  mutate(MALE = ifelse(SEX == 1, 1, 0)) %>%
+  mutate(DIS = ifelse(DIS == 1, 1, 0)) %>%
+  mutate(Absent = ifelse(ESR == 2, 1, 0)) %>%
+  mutate(HICOV = ifelse(HICOV == 1, 1, 0)) %>%
+  mutate(EDU.Bachelor = ifelse(EDU == "Bachelor", 1, 0)) %>%
+  mutate(EDU.Graduate = ifelse(EDU == "Post-Bachelor", 1, 0)) %>%
+  mutate(EDU.Other = ifelse(EDU == "Other", 1, 0)) %>%
+  select(-c("X", "SERIALNO", "SPORDER", "WKHP", "TEN", "HUPAOC", "WIF", "DEAR",
+            "DEYE", "DOUT", "DPHY", "DREM", "SCHL", "SEX", "ESR", "emp_type", "EDU"))
+
+```
+
+```{r}
+if (!require(corrplot)) install.packages("corrplot")
+library(corrplot)
+```
+
+```{r}
+df_sub <- df_clean %>%
+  select(-c("PWGTP", "NAICS"))
+
+df_cor = cor(df_sub)
+corrplot(df_cor, type="lower", tl.cex=0.7)
+```
+
+Notable correlations
+NOc ~ HUPAOC.OverSix, HUPAOC.Both, HUPAOC.None
+NP ~ HUPAOC.OverSix, HUPAOC.Both, HUPAOC.None
+No clear correlation of absent with other variables - without oversample, only 2% were Absent
+
+```{r}
+df_oversample <- df_clean %>%
+  mutate(PWGTP = ifelse(Absent == 1, ceiling(log(PWGTP)), 1)) %>%
+  select(-c("NAICS"))
+```
+
+```{r}
+model.base <- glm(Absent ~ ., data=as.data.frame(scale(df_sub)))
+summary.base <- summary(model.base)
+summary.base
+```
+
+```{r}
+coefficients.base <- as.data.frame(summary.base$coefficients)
+coefficients.base[-1,] %>%
+  filter(`Pr(>|t|)` <= 0.05) %>%
+  select(Estimate, `Pr(>|t|)`) %>%
+  arrange(desc(abs(Estimate))) %>%
+  head(10)
+
+```
+
+
+
+```{r}
+oversample_weights = df_oversample$PWGTP
+model.oversample <- glm(Absent ~ . - PWGTP, data = as.data.frame(scale(df_oversample)), weights = oversample_weights)
+summary.oversample <- summary(model.oversample)
+summary.oversample
+```
+
+```{r}
+coefficients.oversample <- as.data.frame(summary.oversample$coefficients)
+coefficients.oversample[-1,] %>%
+  filter(`Pr(>|t|)` <= 0.05) %>%
+  select(Estimate, `Pr(>|t|)`,) %>%
+  arrange(desc(abs(Estimate))) %>%
+  head(10)
+```
+

@@ -1,0 +1,161 @@
+---
+title: "random forest"
+output: html_document
+---
+
+```{r}
+library(glmnet)
+library(dplyr)
+library(tidyverse)
+library(corrplot)
+library(corpcor)
+library(Ecdat)
+library(ggplot2) 
+library(ISLR)
+library(tidyverse)
+library(ROCR)
+library(pROC)
+```
+
+```{r}
+df <- read.csv("ny.csv")
+
+df_clean <- df %>%
+  select(-grep("PWGTP\\d", colnames(df))) %>%  # drop extra weight columns
+  select(-ends_with("_label")) %>%  # drop labels
+  select(-c("WGTP", "OCCP", "WKWN", "JWTRNS", "ST", "RT", "NAICSP")) %>%
+  filter(NOC != -1) %>%
+  mutate(WKHP.PartTime = ifelse(WKHP < 35, 1, 0)) %>%
+  mutate(WKHP.FullTime = ifelse(WKHP >= 35 & WKHP <= 50, 1, 0)) %>%
+  mutate(WKHP.OverTime = ifelse(WKHP > 50, 1, 0)) %>%
+  filter(TEN != -1) %>%
+  mutate(TEN.OwnLoan = ifelse(TEN == 1, 1, 0)) %>%
+  mutate(TEN.Own = ifelse(TEN == 2, 1, 0)) %>%
+  mutate(TEN.Rent = ifelse(TEN == 3, 1, 0)) %>%
+  mutate(TEN.NoPay = ifelse(TEN == 4, 1, 0)) %>%
+  filter(VEH != "b") %>%
+  mutate_at("VEH", as.integer) %>%
+  filter(HUPAOC != "b") %>%
+  mutate(HUPAOC.UnderSix = ifelse(HUPAOC == 1, 1, 0)) %>%
+  mutate(HUPAOC.OverSix = ifelse(HUPAOC == 2, 1, 0)) %>%
+  mutate(HUPAOC.Both = ifelse(HUPAOC == 3, 1, 0)) %>%
+  mutate(HUPAOC.None = ifelse(HUPAOC == 4, 1, 0)) %>%
+  mutate(FER = ifelse(FER == 1, 1, 0)) %>%
+  mutate(HINS1 = ifelse(HINS1 == 1, 1, 0)) %>%
+  mutate(MALE = ifelse(SEX == 1, 1, 0)) %>%
+  mutate(DIS = ifelse(DIS == 1, 1, 0)) %>%
+  mutate(Absent = ifelse(ESR == 2, 1, 0)) %>%
+  mutate(HICOV = ifelse(HICOV == 1, 1, 0)) %>%
+  mutate(EDU.Bachelor = ifelse(EDU == "Bachelor", 1, 0)) %>%
+  mutate(EDU.Graduate = ifelse(EDU == "Post-Bachelor", 1, 0)) %>%
+  mutate(EDU.Other = ifelse(EDU == "Other", 1, 0)) %>%
+  select(-c("X", "SERIALNO", "SPORDER", "WKHP", "TEN", "HUPAOC", "WIF", "DEAR",
+            "DEYE", "DOUT", "DPHY", "DREM", "SCHL", "SEX", "ESR", "emp_type", "EDU"))
+```
+
+```{r}
+set.seed(1)
+data <- df_clean
+data <- data %>% mutate(PWGTP = ifelse(Absent == 1, ceiling(log(PWGTP)), 1))
+```
+
+```{r}
+weights<-data$PWGTP
+Absent<-data$Absent
+NAICS<-data$NAICS
+
+X<-data.matrix(select(data,-c(PWGTP,NAICS,Absent)))
+data<-as.data.frame(wt.scale(X,weights, center=TRUE,scale=TRUE))
+# data<-data %>% cbind(NAICS,Absent)
+data <- data %>% cbind(Absent)
+```
+
+```{r}
+# mask_train <- sample(nrow(data), size = floor(nrow(data) * 0.7))
+# data_train <- data[mask_train,] # training data set
+# data_test <- data[-mask_train, ] # test set 
+```
+
+```{r}
+mask_train <- sample(nrow(data), size = floor(nrow(data) * 0.6))
+data_train <- data[mask_train,] # training data set
+
+remaining <- data[-mask_train, ]
+mask_val <- sample(nrow(remaining), size = floor(nrow(remaining)/2))
+
+data_val <- remaining[mask_val,]  # validation data set
+data_test <- remaining[-mask_val, ]
+```
+
+```{r}
+library("rpart")
+```
+
+```{r}
+rpart_model <- rpart(
+  as.factor(Absent) ~ .,
+  data=data_train,
+  method="class",
+)
+summary(rpart_model)
+```
+
+```{r}
+library(randomForest)
+# library(caret)
+```
+
+```{r}
+forest_model <- randomForest(
+  as.factor(Absent) ~.,
+  data=data_train,
+  importance=T
+)
+summary(forest_model)
+```
+
+```{r}
+forest_model
+```
+
+```{r}
+as.data.frame(forest_model$importance) %>% arrange(desc(abs(`1`)))
+```
+
+```{r}
+forest_pred <- predict(forest_model, newdata=data_val[,1:25], type="response")
+confusion<-confusionMatrix(
+  data=as.factor(forest_pred),
+  reference=as.factor(data_val$Absent),
+  positive='1')
+confusion
+```
+
+```{r}
+# control <- trainControl(
+#   method="repeatedcv",
+#   number=5,
+#   search="grid"
+# )
+# 
+# max_vars <- floor(sqrt(ncol(data_train)))
+# grid <- expand.grid(mtry=c(1:max_vars))
+# 
+# forest_cv <- train(
+#   as.factor(Absent) ~ .,
+#   data=data_train,
+#   method="rf",
+#   trControl=control,
+#   tuneGrid=grid,
+# )
+
+```
+
+```{r}
+# print(forest_cv)
+```
+
+```{r}
+# forest_cv$finalModel
+```
+

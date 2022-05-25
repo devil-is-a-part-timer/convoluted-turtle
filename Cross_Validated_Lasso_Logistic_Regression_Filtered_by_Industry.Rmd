@@ -1,0 +1,238 @@
+---
+title: "Lasso CV Logistic Regression Filtered by Industry"
+author: "Team 59"
+date: "4/19/2022"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+libraries and seed
+```{r}
+rm(list = ls())
+
+set.seed(1)
+
+library(glmnet)
+library(dplyr)
+library(tidyverse)
+library(corrplot)
+library(corpcor)
+library(Ecdat)
+library(ggplot2) 
+library(ISLR)
+library(tidyverse)
+library(ROCR)
+library(pROC)
+library(kernlab)
+library(caret)
+library(plotmo)
+library(matchmaker)
+library(broom.mixed)
+library(ggstance)
+library(jtools)
+
+
+```
+
+Reading in cleaned data 
+```{r}
+
+##setting working directory
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+df <- read.csv("ny.csv")
+
+
+df %>%
+  mutate(Absent = ifelse(ESR == 2, 1, 0)) %>% #if absent = 2 , set to 1, otherwise set to 0
+  mutate(NonAbsent = ifelse(ESR == 1, 1, 0)) %>%
+  mutate(Absent.Weighted = ifelse(ESR == 2, 1, 0) * PWGTP) %>% #accounting for the weight assigned to each individual
+  mutate(NonAbsent.Weighted = ifelse(ESR == 1, 1, 0) * PWGTP) %>%
+  mutate(Absent.Weighted.log = ifelse(ESR == 2, 1, 0) * ceiling(log(PWGTP))) %>% #log transforming just for fun? 
+  group_by(NAICS) %>% #grouping by industry
+  summarise(
+    Percent.Unweighted = sum(Absent) / (sum(Absent) + sum(NonAbsent)) * 100,
+    Percent.Weighted = sum(Absent.Weighted) / (sum(Absent.Weighted) + sum(NonAbsent.Weighted)) * 100,
+    Percent.Oversample = sum(Absent.Weighted) / (sum(Absent.Weighted) + sum(NonAbsent)) * 100,
+    Percent.Oversample.log = sum(Absent.Weighted.log) / (sum(Absent.Weighted.log) + sum(NonAbsent)) * 100
+  )
+
+df_clean <- df %>%
+  select(-grep("PWGTP\\d", colnames(df))) %>%  # drop extra weight columns
+  select(-ends_with("_label")) %>%  # drop labels
+  select(-c("WGTP", "OCCP", "WKWN", "JWTRNS", "ST", "RT", "NAICSP")) %>%
+  filter(NOC != -1) %>%
+  mutate(WKHP.PartTime = ifelse(WKHP < 35, 1, 0)) %>%
+  mutate(WKHP.FullTime = ifelse(WKHP >= 35 & WKHP <= 50, 1, 0)) %>%
+  mutate(WKHP.OverTime = ifelse(WKHP > 50, 1, 0)) %>%
+  filter(TEN != -1) %>%
+  mutate(TEN.OwnLoan = ifelse(TEN == 1, 1, 0)) %>%
+  mutate(TEN.Own = ifelse(TEN == 2, 1, 0)) %>%
+  mutate(TEN.Rent = ifelse(TEN == 3, 1, 0)) %>%
+  mutate(TEN.NoPay = ifelse(TEN == 4, 1, 0)) %>%
+  filter(VEH != "b") %>%
+  mutate_at("VEH", as.integer) %>%
+  filter(HUPAOC != "b") %>%
+  mutate(HUPAOC.UnderSix = ifelse(HUPAOC == 1, 1, 0)) %>%
+  mutate(HUPAOC.OverSix = ifelse(HUPAOC == 2, 1, 0)) %>%
+  mutate(HUPAOC.Both = ifelse(HUPAOC == 3, 1, 0)) %>%
+  mutate(HUPAOC.None = ifelse(HUPAOC == 4, 1, 0)) %>%
+  mutate(FER = ifelse(FER == 1, 1, 0)) %>%
+  mutate(HINS1 = ifelse(HINS1 == 1, 1, 0)) %>%
+  mutate(MALE = ifelse(SEX == 1, 1, 0)) %>%
+  mutate(DIS = ifelse(DIS == 1, 1, 0)) %>%
+  mutate(Absent = ifelse(ESR == 2, 1, 0)) %>%
+  mutate(HICOV = ifelse(HICOV == 1, 1, 0)) %>%
+  mutate(EDU.Bachelor = ifelse(EDU == "Bachelor", 1, 0)) %>%
+  mutate(EDU.Graduate = ifelse(EDU == "Post-Bachelor", 1, 0)) %>%
+  mutate(EDU.Other = ifelse(EDU == "Other", 1, 0)) %>%
+  select(-c("X", "SERIALNO", "SPORDER", "WKHP", "TEN", "HUPAOC", "WIF", "DEAR",
+            "DEYE", "DOUT", "DPHY", "DREM", "SCHL", "SEX", "ESR", "emp_type", "EDU"))
+
+data<-df_clean
+```
+Applying oversampling, scaling and applying weights
+```{r}
+data <- data %>% mutate(PWGTP = ifelse(Absent == 1, ceiling(log(PWGTP)), 1))
+
+weights<-data$PWGTP
+Absent<-data$Absent
+NAICS<-data$NAICS
+
+X<-data.matrix(select(data,-c(PWGTP,NAICS,Absent)))
+data<-as.data.frame(wt.scale(X,weights, center=TRUE,scale=TRUE))
+data<-data %>% cbind(NAICS,Absent)
+
+#double checking
+head(data)
+```
+
+Predictive power of models per industry with custom lambda values for each  
+```{r}
+
+#Identifying unique industries
+NAICS_vals<-unique(NAICS)
+
+#this industry has no absence values
+NAICS_vals <- NAICS_vals[! NAICS_vals %in% c('EXT')]
+
+#creating a key for NAICS code (Industry code)
+NAICS_key<-c('AGR'='Agriculture', 'CON'='Construction','EDU'='Education','ENT'='Entertainment','EXT'='Extraction',
+             'FIN'='Finance', 'INF'= 'Information', 'MED'='Medical', 'MFG'= 'Manufacturing','PRF'='Prof. Services',
+             'RET'='Retail','SCA'='Family Services', 'SRV'='Service', 'TRN'='Transportation', 'UTL'='Utilities', 'WHL'='Wholesale')
+
+
+#creating empty vectors for the loop
+NAICS_val<-c()
+AUC_val<-c()
+accuracy<-c()
+
+#loop over each industry
+for (i in NAICS_vals) {
+  
+  #creating splits for each loop
+  mask_train = sample(nrow(data), size = floor(nrow(data) * 0.7))
+  d.learn = data[mask_train,] # training data set
+
+  # Using the remaining data for test and validation split
+  remaining = data[-mask_train, ]  # all rows except training
+
+  mask_test = sample(nrow(remaining))
+  d.test = remaining[mask_test,]  # test data set
+
+
+  print(paste('NAICS id:', i))
+  d.learn_run<-d.learn %>% filter(NAICS==i)
+  d.test_run<-d.test %>% filter( NAICS==i)
+  
+  
+  XP<-data.matrix(select(d.learn_run,-c(Absent,NAICS)))
+  YP<-data.matrix(d.learn_run$Absent)
+  
+  
+  #running through lasso
+  lasso=glmnet(x=XP,y=as.factor(YP), family='binomial', alpha=1, standardize=FALSE, type.measure='deviance')  
+
+  #using cross validation to select optimal lambda value for each run - should the same lambda be used for each run? 
+  cv.lasso <- cv.glmnet(x=XP,y=as.factor(YP), family='binomial', type.measure = 'deviance', alpha=1, standardize=FALSE)
+  
+  #iding the significant predictors from lasso
+  predictor_out<-as.data.frame(coef(lasso, s=cv.lasso$ lambda.min)[,1])
+  lasso_predictors<-(filter(predictor_out, predictor_out!=0)[0])
+  predictors<-as.vector(rownames(lasso_predictors)[2:length(rownames(lasso_predictors))])
+  
+  #if there is actually predictive power than there will be a list of predictors from above
+  if (length(predictors)>3){
+
+    #data_selected<-select(d.learn, c(predictors, Absent))
+    #data_selected
+    
+    #this is simply to get the AIC value from the model with the predictors selected from lasso 
+    #mod_lasso = glm(Absent ~ .,family='binomial', data = data_selected) 
+    
+    #running the trained model on the test set
+    cv.lasso_predicted<-predict(cv.lasso, s=cv.lasso$ lambda.min, newx=data.matrix(select(d.test_run, -c(Absent, NAICS))),type='response')
+    
+    #adding on the outputted prediction values to the test set
+    d.test_reg<- d.test_run %>% mutate(d.test_run, pred_prob = as.vector(cv.lasso_predicted))
+    
+    length(d.test_run)
+    #finding the best threshold value to use for cutoff value
+    roc <- roc(d.test_reg$Absent, d.test_reg$pred_prob)
+    best_thresh<-coords(roc, "best", ret = "threshold")[1,1]
+    
+    d.test_reg<- d.test_reg %>% mutate(d.test_reg, pred_outcome= ifelse(pred_prob>best_thresh, 1, 0))
+    
+    #outputting a confusion matrix for each industry
+    t<-xtabs(~Absent + pred_outcome, data = d.test_reg)
+
+    #determining area under curve
+    pred <- prediction(d.test_reg$pred_prob,d.test_reg$Absent) # creating a prediction object 
+    
+    #making sure we have the right label
+    NAICS_val<-append(NAICS_val,i )
+    
+    perf <- performance(pred, "tpr", "fpr") # tpr and fpr are true and false positive rates
+    
+    # calculate Area Under the Curve for this Logit Model
+    auc.perf <-  performance(pred, measure = "auc")
+    auc_value<-round(as.double(auc.perf@y.values),2)
+    AUC_val<-append(AUC_val,auc_value)
+    print(paste('AUC value:', auc_value))
+  
+    # getting total accuracy from the confusion matrix and appending to outloop vector
+    totalaccuracy<-(t[1,1]+t[2,2])/sum(t)
+    print(paste("total model accuracy:", round(totalaccuracy,2)))
+    accuracy<-append(accuracy,totalaccuracy )
+    
+
+  }
+  else{print('no predictive power')}
+  #end if else
+} #end of loop
+
+
+
+
+#matching the abbreviated naics industry to the full name
+cleaned<-match_vec(x=NAICS_val, dictionary = data.frame(keyName=names(NAICS_key), value=NAICS_key, row.names=NULL))
+
+#creating vector for accuracy and auc 
+Accuracyinput <- c(accuracy,AUC_val)
+
+#creating labels for accuracy and AuC
+performance<-rep(c('Accuracy','AUC'),each=length(accuracy))
+
+#combining all in a data frame
+response_df<-data.frame(cleaned,Accuracyinput, performance)
+
+response_df$Accuracyinput <- as.numeric(as.character(response_df$Accuracyinput))
+response_df %>% group_by(cleaned, performance)
+
+
+response_df %>% group_by(cleaned, performance) %>% ggplot(aes(x = cleaned, y = Accuracyinput, fill=performance)) + geom_col(stat='identity', position = 'dodge', width=0.8) + labs(title='Accuracy and AUC of Logistic Regression Model by Industry') + xlab('Industry') + ylab('Response') +
+  theme(axis.text.x = element_text(face="bold", color="#993333", 
+                           size=10, angle=90, vjust=.6)) 
+
+
+```

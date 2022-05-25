@@ -1,0 +1,328 @@
+---
+title: "Predictor Impact by Industry"
+author: "Team 59"
+date: "4/23/2022"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+rm(list = ls())
+
+set.seed(1)
+
+library(glmnet)
+library(dplyr)
+library(tidyverse)
+library(corrplot)
+library(corpcor)
+library(Ecdat)
+library(ggplot2) 
+library(ISLR)
+library(tidyverse)
+library(ROCR)
+library(pROC)
+library(kernlab)
+library(caret)
+library(plotmo)
+library(matchmaker)
+library(broom.mixed)
+library(ggstance)
+library(jtools)
+library(Polychrome)
+```
+
+
+```{r}
+
+##setting working directory
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+df <- read.csv("ny.csv")
+
+df %>%
+  mutate(Absent = ifelse(ESR == 2, 1, 0)) %>% #if absent = 2 , set to 1, otherwise set to 0
+  mutate(NonAbsent = ifelse(ESR == 1, 1, 0)) %>%
+  mutate(Absent.Weighted = ifelse(ESR == 2, 1, 0) * PWGTP) %>% #accounting for the weight assigned to each individual
+  mutate(NonAbsent.Weighted = ifelse(ESR == 1, 1, 0) * PWGTP) %>%
+  mutate(Absent.Weighted.log = ifelse(ESR == 2, 1, 0) * ceiling(log(PWGTP))) %>% #log transforming just for fun? 
+  group_by(NAICS) %>% #grouping by industry
+  summarise(
+    Percent.Unweighted = sum(Absent) / (sum(Absent) + sum(NonAbsent)) * 100,
+    Percent.Weighted = sum(Absent.Weighted) / (sum(Absent.Weighted) + sum(NonAbsent.Weighted)) * 100,
+    Percent.Oversample = sum(Absent.Weighted) / (sum(Absent.Weighted) + sum(NonAbsent)) * 100,
+    Percent.Oversample.log = sum(Absent.Weighted.log) / (sum(Absent.Weighted.log) + sum(NonAbsent)) * 100
+  )
+
+df_clean <- df %>%
+  select(-grep("PWGTP\\d", colnames(df))) %>%  # drop extra weight columns
+  select(-ends_with("_label")) %>%  # drop labels
+  select(-c("WGTP", "OCCP", "WKWN", "JWTRNS", "ST", "RT", "NAICSP")) %>%
+  filter(NOC != -1) %>%
+  mutate(WKHP.PartTime = ifelse(WKHP < 35, 1, 0)) %>%
+  mutate(WKHP.FullTime = ifelse(WKHP >= 35 & WKHP <= 50, 1, 0)) %>%
+  mutate(WKHP.OverTime = ifelse(WKHP > 50, 1, 0)) %>%
+  filter(TEN != -1) %>%
+  mutate(TEN.OwnLoan = ifelse(TEN == 1, 1, 0)) %>%
+  mutate(TEN.Own = ifelse(TEN == 2, 1, 0)) %>%
+  mutate(TEN.Rent = ifelse(TEN == 3, 1, 0)) %>%
+  mutate(TEN.NoPay = ifelse(TEN == 4, 1, 0)) %>%
+  filter(VEH != "b") %>%
+  mutate_at("VEH", as.integer) %>%
+  filter(HUPAOC != "b") %>%
+  mutate(HUPAOC.UnderSix = ifelse(HUPAOC == 1, 1, 0)) %>%
+  mutate(HUPAOC.OverSix = ifelse(HUPAOC == 2, 1, 0)) %>%
+  mutate(HUPAOC.Both = ifelse(HUPAOC == 3, 1, 0)) %>%
+  mutate(HUPAOC.None = ifelse(HUPAOC == 4, 1, 0)) %>%
+  mutate(FER = ifelse(FER == 1, 1, 0)) %>%
+  mutate(HINS1 = ifelse(HINS1 == 1, 1, 0)) %>%
+  mutate(MALE = ifelse(SEX == 1, 1, 0)) %>%
+  mutate(DIS = ifelse(DIS == 1, 1, 0)) %>%
+  mutate(Absent = ifelse(ESR == 2, 1, 0)) %>%
+  mutate(HICOV = ifelse(HICOV == 1, 1, 0)) %>%
+  mutate(EDU.Bachelor = ifelse(EDU == "Bachelor", 1, 0)) %>%
+  mutate(EDU.Graduate = ifelse(EDU == "Post-Bachelor", 1, 0)) %>%
+  mutate(EDU.Other = ifelse(EDU == "Other", 1, 0)) %>%
+  select(-c("X", "SERIALNO", "SPORDER", "WKHP", "TEN", "HUPAOC", "WIF", "DEAR",
+            "DEYE", "DOUT", "DPHY", "DREM", "SCHL", "SEX", "ESR", "emp_type", "EDU"))
+
+data<-df_clean
+head(data)
+```
+
+```{r}
+#applying oversampling
+data <- data %>% mutate(PWGTP = ifelse(Absent == 1, ceiling(log(PWGTP)), 1))
+
+#Scaling and applying weights
+weights<-data$PWGTP
+Absent<-data$Absent
+NAICS<-data$NAICS
+
+X<-data.matrix(select(data,-c(PWGTP,NAICS,Absent)))
+data<-as.data.frame(wt.scale(X,weights, center=TRUE,scale=TRUE))
+data<-data %>% cbind(NAICS,Absent)
+```
+
+
+Creating models for each industry
+
+Creating a model for the wholesale industry
+```{r}
+#filtering by model 
+data_run<-data %>% filter(NAICS=='WHL')
+
+  
+XP<-data.matrix(select(data_run,-c(Absent,NAICS)))
+YP<-data.matrix(data_run$Absent)
+  
+#running through lasso
+lasso=glmnet(x=XP,y=as.factor(YP), family='binomial', alpha=1, standardize=FALSE, type.measure='deviance')  
+  
+#using cross validation to select optimal lambda value for each
+cv.lasso <- cv.glmnet(x=XP,y=as.factor(YP), family='binomial', type.measure = 'deviance', alpha=1, standardize=FALSE)
+  
+#Identifying the significant predictors from lasso
+predictor_out<-as.data.frame(coef(lasso, s=cv.lasso$ lambda.min)[,1])
+lasso_predictors<-(filter(predictor_out, predictor_out!=0)[0])
+predictors<-as.vector(rownames(lasso_predictors)[2:length(rownames(lasso_predictors))])
+
+#Creating a new model that is run only on these predictors
+data_selected<-select(data, c(predictors, Absent))
+lasso_model = glm(Absent ~ .,family='binomial', data = data_selected)  
+  
+#filtering the model outputted coefficients by stat significance
+thecoefficients<-as.data.frame(summary(lasso_model)$ coefficients)
+coef.input<-filter(thecoefficients, thecoefficients$'Pr(>|z|)'<0.05)
+coef.input<-rownames(coef.input)
+coef.input<-as.vector(coef.input[2:length(coef.input)])
+
+#rerunning the model but this time only on the significant predictors that were output from the above lasso_model
+data_selected<-select(data, c(coef.input, Absent))
+WHL_model = glm(Absent ~ .,family='binomial', data = data_selected)
+summary(WHL_model)
+```
+
+ a model for the professional services industry
+```{r}
+#filtering by model 
+data_run<-data %>% filter(NAICS=='PRF')
+
+  
+XP<-data.matrix(select(data_run,-c(Absent,NAICS)))
+YP<-data.matrix(data_run$Absent)
+  
+#running through lasso
+lasso=glmnet(x=XP,y=as.factor(YP), family='binomial', alpha=1, standardize=FALSE, type.measure='deviance')  
+  
+#using cross validation to select optimal lambda value for each
+cv.lasso <- cv.glmnet(x=XP,y=as.factor(YP), family='binomial', type.measure = 'deviance', alpha=1, standardize=FALSE)
+  
+#Identifying the significant predictors from lasso
+predictor_out<-as.data.frame(coef(lasso, s=cv.lasso$ lambda.min)[,1])
+lasso_predictors<-(filter(predictor_out, predictor_out!=0)[0])
+predictors<-as.vector(rownames(lasso_predictors)[2:length(rownames(lasso_predictors))])
+
+#Creating a new model that is run only on these predictors
+data_selected<-select(data, c(predictors, Absent))
+lasso_model = glm(Absent ~ .,family='binomial', data = data_selected)  
+
+#filtering the model outputted coefficients by stat significance
+thecoefficients<-as.data.frame(summary(lasso_model)$ coefficients)
+coef.input<-filter(thecoefficients, thecoefficients$'Pr(>|z|)'<0.05)
+coef.input<-rownames(coef.input)
+coef.input<-as.vector(coef.input[2:length(coef.input)])
+
+#rerunning the model but this time only on the significant predictors that were output from the above lasso_model
+data_selected<-select(data, c(coef.input, Absent))
+PRF_model = glm(Absent ~ .,family='binomial', data = data_selected)
+summary(PRF_model)
+```
+
+a model for the medical industry 
+```{r}
+#filtering by model 
+data_run<-data %>% filter(NAICS=='MED')
+
+  
+XP<-data.matrix(select(data_run,-c(Absent,NAICS)))
+YP<-data.matrix(data_run$Absent)
+  
+#running through lasso
+lasso=glmnet(x=XP,y=as.factor(YP), family='binomial', alpha=1, standardize=FALSE, type.measure='deviance')  
+  
+#using cross validation to select optimal lambda value for each 
+cv.lasso <- cv.glmnet(x=XP,y=as.factor(YP), family='binomial', type.measure = 'deviance', alpha=1, standardize=FALSE)
+  
+#Identifying the significant predictors from lasso
+predictor_out<-as.data.frame(coef(lasso, s=cv.lasso$ lambda.min)[,1])
+lasso_predictors<-(filter(predictor_out, predictor_out!=0)[0])
+predictors<-as.vector(rownames(lasso_predictors)[2:length(rownames(lasso_predictors))])
+
+#Creating a new model that is run only on these predictors
+data_selected<-select(data, c(predictors, Absent))
+lasso_model = glm(Absent ~ .,family='binomial', data = data_selected)  
+
+#filtering the model outputted coefficients by stat significance
+thecoefficients<-as.data.frame(summary(lasso_model)$ coefficients)
+coef.input<-filter(thecoefficients, thecoefficients$'Pr(>|z|)'<0.05)
+coef.input<-rownames(coef.input)
+coef.input<-as.vector(coef.input[2:length(coef.input)])
+
+#rerunning the model but this time only on the significant predictors that were output from the above lasso_model
+data_selected<-select(data, c(coef.input, Absent))
+MED_model = glm(Absent ~ .,family='binomial', data = data_selected)
+summary(MED_model)
+```
+
+A model for the retail industry
+```{r}
+#filtering by model 
+data_run<-data %>% filter(NAICS=='RET')
+
+  
+XP<-data.matrix(select(data_run,-c(Absent,NAICS)))
+YP<-data.matrix(data_run$Absent)
+  
+#running through lasso
+lasso=glmnet(x=XP,y=as.factor(YP), family='binomial', alpha=1, standardize=FALSE, type.measure='deviance')  
+  
+#using cross validation to select optimal lambda value for each 
+cv.lasso <- cv.glmnet(x=XP,y=as.factor(YP), family='binomial', type.measure = 'deviance', alpha=1, standardize=FALSE)
+  
+#Identifying the significant predictors from lasso
+predictor_out<-as.data.frame(coef(lasso, s=cv.lasso$ lambda.min)[,1])
+lasso_predictors<-(filter(predictor_out, predictor_out!=0)[0])
+predictors<-as.vector(rownames(lasso_predictors)[2:length(rownames(lasso_predictors))])
+
+#Creating a new model that is run only on these predictors
+data_selected<-select(data, c(predictors, Absent))
+lasso_model = glm(Absent ~ .,family='binomial', data = data_selected)  
+
+#filtering the model outputted coefficients by stat significance
+thecoefficients<-as.data.frame(summary(lasso_model)$ coefficients)
+coef.input<-filter(thecoefficients, thecoefficients$'Pr(>|z|)'<0.05)
+coef.input<-rownames(coef.input)
+coef.input<-as.vector(coef.input[2:length(coef.input)])
+
+#rerunning the model but this time only on the significant predictors that were output from the above lasso_model
+data_selected<-select(data, c(coef.input, Absent))
+RET_model = glm(Absent ~ .,family='binomial', data = data_selected)
+summary(RET_model)
+```
+
+a model for the finance industry
+```{r}
+#filtering by model 
+data_run<-data %>% filter(NAICS=='FIN')
+
+  
+XP<-data.matrix(select(data_run,-c(Absent,NAICS)))
+YP<-data.matrix(data_run$Absent)
+  
+#running through lasso
+lasso=glmnet(x=XP,y=as.factor(YP), family='binomial', alpha=1, standardize=FALSE, type.measure='deviance')  
+  
+#using cross validation to select optimal lambda value for each 
+cv.lasso <- cv.glmnet(x=XP,y=as.factor(YP), family='binomial', type.measure = 'deviance', alpha=1, standardize=FALSE)
+  
+#Identifying the significant predictors from lasso
+predictor_out<-as.data.frame(coef(lasso, s=cv.lasso$ lambda.min)[,1])
+lasso_predictors<-(filter(predictor_out, predictor_out!=0)[0])
+predictors<-as.vector(rownames(lasso_predictors)[2:length(rownames(lasso_predictors))])
+
+#Creating a new model that is run only on these predictors
+data_selected<-select(data, c(predictors, Absent))
+lasso_model = glm(Absent ~ .,family='binomial', data = data_selected)  
+
+#filtering the model outputted coefficients by stat significance
+thecoefficients<-as.data.frame(summary(lasso_model)$ coefficients)
+coef.input<-filter(thecoefficients, thecoefficients$'Pr(>|z|)'<0.05)
+coef.input<-rownames(coef.input)
+coef.input<-as.vector(coef.input[2:length(coef.input)])
+
+#rerunning the model but this time only on the significant predictors that were output from the above lasso_model
+data_selected<-select(data, c(coef.input, Absent))
+FIN_model = glm(Absent ~ .,family='binomial', data = data_selected)
+summary(FIN_model)
+```
+Creating a figure of the sig predictors with their coefficients from each of the above industry models
+```{r}
+
+#creating color vector for labeling
+c25 <- c(
+  "dodgerblue2", "#E31A1C", # red
+  "green4",
+  "#6A3D9A", # purple
+  "#FF7F00", # orange
+  "black", "gold1",
+  "skyblue2", "#FB9A99", # lt pink
+  "palegreen2")
+  
+#Cannot knit this out - will attach as image, but here is the code:
+#Creating figure of industry and coefs values
+#  plot_summs(WHL_model,PRF_model,MED_model,RET_model,FIN_model, scale=FALSE, legend.title = "Industry", 
+#             model.names =c("Wholesale","Professional Services","Medical","Retail","Finance"),
+#             coefs = c("Wage" = "WAGP", "Age" = "AGEP","Number of Vehicles" = "VEH", "Gave birth in last 12 months"="FER", 
+#                       "Health Insurance through employer"="HINS1", 
+#                       "Disabled" = "DIS", "Has children under 6 years of age" = "HUPAOC.UnderSix", "Part time employee"="WKHP.PartTime",
+#                       "Holds a Bachelor's Degree"="EDU.Bachelor", "Number of Children"="NOC", "Owns their home" = "TEN.Own",
+#                       "Rents their home" = "TEN.Rent" , "Has children above and below 6 years of age"="HUPAOC.Both"),
+#             colors=c25) + 
+#    labs(title='Comparison of Statistically Significant Predictor Coefficients by Industry', element_text(size=25)) +
+#    xlab('Coefficient Value') +ylab('Predictor') + 
+#    expand_limits(x = c(-1, 1))+
+#    theme_bw()+
+#    theme(panel.grid.major=element_blank(),
+#           panel.grid.minor=element_blank(),
+#           panel.border=element_blank(),
+#           axis.line=element_line(),
+#          legend.position = c(0.8, 0.25),
+#          legend.title=element_text(15), 
+#          axis.text=element_text(size=15),
+#          axis.title=element_text(size=15),
+#          legend.text = element_text(size = 15),
+#          plot.title=element_text(hjust=0.5))
+  
+
+```

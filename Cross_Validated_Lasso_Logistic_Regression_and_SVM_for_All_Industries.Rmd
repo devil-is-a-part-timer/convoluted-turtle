@@ -1,0 +1,298 @@
+---
+title: "Cross Validated Lasso Logistic Regression and SVM for All Industries"
+author: "Team 59"
+date: "4/17/2022"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+Setting libraries
+```{r}
+rm(list = ls())
+
+set.seed(1)
+
+library(glmnet)
+library(dplyr)
+library(tidyverse)
+library(corrplot)
+library(corpcor)
+library(Ecdat)
+library(ggplot2) 
+library(ISLR)
+library(tidyverse)
+library(ROCR)
+library(pROC)
+library(kernlab)
+library(caret)
+library(plotmo)
+
+```
+
+Reading in cleaned data
+```{r}
+
+##setting working directory
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+df <- read.csv("ny.csv")
+
+
+
+df %>%
+  mutate(Absent = ifelse(ESR == 2, 1, 0)) %>% #if absent = 2 , set to 1, otherwise set to 0
+  mutate(NonAbsent = ifelse(ESR == 1, 1, 0)) %>%
+  mutate(Absent.Weighted = ifelse(ESR == 2, 1, 0) * PWGTP) %>% #accounting for the weight assigned to each individual
+  mutate(NonAbsent.Weighted = ifelse(ESR == 1, 1, 0) * PWGTP) %>%
+  mutate(Absent.Weighted.log = ifelse(ESR == 2, 1, 0) * ceiling(log(PWGTP))) %>% #log transforming just for fun? 
+  group_by(NAICS) %>% #grouping by industry
+  summarise(
+    Percent.Unweighted = sum(Absent) / (sum(Absent) + sum(NonAbsent)) * 100,
+    Percent.Weighted = sum(Absent.Weighted) / (sum(Absent.Weighted) + sum(NonAbsent.Weighted)) * 100,
+    Percent.Oversample = sum(Absent.Weighted) / (sum(Absent.Weighted) + sum(NonAbsent)) * 100,
+    Percent.Oversample.log = sum(Absent.Weighted.log) / (sum(Absent.Weighted.log) + sum(NonAbsent)) * 100
+  )
+
+df_clean <- df %>%
+  select(-grep("PWGTP\\d", colnames(df))) %>%  # drop extra weight columns
+  select(-ends_with("_label")) %>%  # drop labels
+  select(-c("WGTP", "OCCP", "WKWN", "JWTRNS", "ST", "RT", "NAICSP")) %>%
+  filter(NOC != -1) %>%
+  mutate(WKHP.PartTime = ifelse(WKHP < 35, 1, 0)) %>%
+  mutate(WKHP.FullTime = ifelse(WKHP >= 35 & WKHP <= 50, 1, 0)) %>%
+  mutate(WKHP.OverTime = ifelse(WKHP > 50, 1, 0)) %>%
+  filter(TEN != -1) %>%
+  mutate(TEN.OwnLoan = ifelse(TEN == 1, 1, 0)) %>%
+  mutate(TEN.Own = ifelse(TEN == 2, 1, 0)) %>%
+  mutate(TEN.Rent = ifelse(TEN == 3, 1, 0)) %>%
+  mutate(TEN.NoPay = ifelse(TEN == 4, 1, 0)) %>%
+  filter(VEH != "b") %>%
+  mutate_at("VEH", as.integer) %>%
+  filter(HUPAOC != "b") %>%
+  mutate(HUPAOC.UnderSix = ifelse(HUPAOC == 1, 1, 0)) %>%
+  mutate(HUPAOC.OverSix = ifelse(HUPAOC == 2, 1, 0)) %>%
+  mutate(HUPAOC.Both = ifelse(HUPAOC == 3, 1, 0)) %>%
+  mutate(HUPAOC.None = ifelse(HUPAOC == 4, 1, 0)) %>%
+  mutate(FER = ifelse(FER == 1, 1, 0)) %>%
+  mutate(HINS1 = ifelse(HINS1 == 1, 1, 0)) %>%
+  mutate(MALE = ifelse(SEX == 1, 1, 0)) %>%
+  mutate(DIS = ifelse(DIS == 1, 1, 0)) %>%
+  mutate(Absent = ifelse(ESR == 2, 1, 0)) %>%
+  mutate(HICOV = ifelse(HICOV == 1, 1, 0)) %>%
+  mutate(EDU.Bachelor = ifelse(EDU == "Bachelor", 1, 0)) %>%
+  mutate(EDU.Graduate = ifelse(EDU == "Post-Bachelor", 1, 0)) %>%
+  mutate(EDU.Other = ifelse(EDU == "Other", 1, 0)) %>%
+  select(-c("X", "SERIALNO", "SPORDER", "WKHP", "TEN", "HUPAOC", "WIF", "DEAR",
+            "DEYE", "DOUT", "DPHY", "DREM", "SCHL", "SEX", "ESR", "emp_type", "EDU"))
+
+data<-df_clean
+```
+
+Applying oversampling
+```{r}
+data <- data %>% mutate(PWGTP = ifelse(Absent == 1, ceiling(log(PWGTP)), 1))
+```
+
+Scaling and applying weights
+```{r}
+weights<-data$PWGTP
+Absent<-data$Absent
+NAICS<-data$NAICS
+
+X<-data.matrix(select(data,-c(PWGTP,NAICS,Absent)))
+data<-as.data.frame(wt.scale(X,weights, center=TRUE,scale=TRUE))
+data<-data %>% cbind(NAICS,Absent)
+
+```
+
+Creating training, validation, and test sets
+```{r}
+
+mask_train = sample(nrow(data), size = floor(nrow(data) * 0.6))
+d.learn = data[mask_train,] # training data set
+
+# Using the remaining data for test and validation split
+remaining = data[-mask_train, ]  # all rows except training
+
+# Half of what's left for validation, half for test
+mask_val = sample(nrow(remaining), size = floor(nrow(remaining)/2))
+
+d.valid = remaining[mask_val,]  # validation data set
+d.test = remaining[-mask_val, ] # test data set
+```
+
+
+Running Lasso for variable selection on the training set and then running cross validation for optimal lambda parameter
+```{r}
+XP<-data.matrix(select(d.learn,-c(Absent,NAICS)))
+YP=data.matrix(d.learn$Absent)
+
+#alpha needs to be set =1 for lasso, =0 for ridge
+lasso=glmnet(x=XP,y=as.factor(YP), family='binomial', alpha=1, standardize=FALSE, type.measure='deviance')  
+
+#Plotting variable coefficients vs shrinkage of lambda
+#The larger lambda is, the more the coefficients are shrunk towards zero, and each other
+plot_glmnet(lasso, label=10)
+
+
+#using cross validation to select optimal lambda value
+cv.lasso <- cv.glmnet(x=XP,y=as.factor(YP), family='binomial', type.measure = 'deviance', alpha=1, standardize=FALSE)
+
+#this plots the cross-validation curve along with upper and lower standard deviation curves along the lambda sequence (the bars)
+plot(cv.lasso)
+
+```
+
+Running fit model on the validation set
+```{r}
+#validating
+cv.lasso_predicted<-predict(cv.lasso, s=cv.lasso$ lambda.min, newx=data.matrix(select(d.valid, -c(Absent, NAICS))),type='response')
+
+d.valid_reg<- d.valid %>% mutate(d.valid, pred_prob = as.vector(cv.lasso_predicted))
+
+#selecting threshold that returns greatest accuracy  - the point where sensitivity and specificity are at their highest
+roc <- roc(d.valid_reg$Absent, d.valid_reg$pred_prob)
+best_thresh<-coords(roc, "best", ret = "threshold")[1,1]
+
+#writing a for loop to test the thresholds
+threshold<-c(best_thresh-.01,best_thresh-.001, best_thresh, best_thresh+.001, best_thresh+.01)
+
+total_accuracy<-c()
+absence_accuracy<-c()
+
+#illustrates what a change in the threshold value does to the confusion matrix for the model
+for (i in threshold) {
+  print('NEWRUN')
+  print(paste('threshold value:',i))
+  d.valid_reg<- d.valid_reg %>% mutate(d.valid_reg, pred_outcome= ifelse(pred_prob>i, 1, 0))
+
+  t<-xtabs(~Absent + pred_outcome, data = d.valid_reg)
+  print(t)
+
+
+  totalaccuracy<-(t[1,1]+t[2,2])/sum(t)
+  print(paste("total model accuracy:", round(totalaccuracy,2)))
+  total_accuracy<-append(total_accuracy,totalaccuracy )
+
+  absence_prediction_acc<-t[2,2]/(t[2,2]+t[2,1])
+  print(paste("absence prediction accuracy:",round(absence_prediction_acc,2)))
+  absence_accuracy<-append(absence_accuracy,absence_prediction_acc )
+}
+
+
+```
+Area under the curve of log regression model
+```{r}
+#determining area under curve
+pred <- prediction(d.valid_reg$pred_prob,d.valid_reg$Absent) # creating a prediction object 
+
+perf <- performance(pred, "tpr", "fpr") # tpr and fpr are true and false positive rates
+plot(perf, colorize=FALSE, main='ROC for Logistic Regression' )
+
+# calculate Area Under the Curve for this Logit Model
+auc.perf <-  performance(pred, measure = "auc")
+print(paste('AUC value:',auc.perf@y.values[[1]]))
+
+```
+Running the model on all of the data to determine the impact of the predictors and create figures
+```{r}
+
+#identifying and removing the predictors that cv lasso set to 0 - cv lasso does this automatically
+#done explicitly here to create some figures
+predictor_out<-as.data.frame(coef(lasso, s=cv.lasso$ lambda.min)[,1])
+lasso_predictors<-(filter(predictor_out, predictor_out!=0)[0])
+predictors<-as.vector(rownames(lasso_predictors)[2:length(rownames(lasso_predictors))])
+
+data_figures<-select(data, c(predictors, Absent))
+
+mod_lasso = glm(Absent ~ .,family='binomial', data = data_figures) 
+summary(mod_lasso)
+
+#filtering predictors based on p value
+thecoefficients<-as.data.frame(summary(mod_lasso)$ coefficients)
+coef.input<-filter(thecoefficients, thecoefficients$'Pr(>|z|)'<0.05)
+coef.input<-rownames(coef.input)
+coef.input<-as.vector(coef.input[2:length(coef.input)])
+
+#Cannot knit this out - will attach as image, but here is the code:
+#plot_summs(mod_lasso, scale=FALSE, 
+#           coefs = c("Wage" = "WAGP", "AGE" = "AGEP","Vehicles" = "VEH", "Given Birth"="FER","Health Insurance"="HINS1",
+#                     "Disability" = "DIS", "Child under 6" = "HUPAOC.UnderSix")) +
+#  labs(title='Comparison of Statistically Significant Predictor Coefficients') +
+#  theme(plot.title=element_text(hjust=-0.1)) + xlab('Coefficient Value') + expand_limits(x = c(-1, 1))
+
+```
+
+
+Training an SVM model and running on the validation set
+```{r}
+
+#using the same predictors from lasso 
+XPS<-data.matrix(select(d.learn, predictors))
+#XPS<-data.matrix(select(d.learn, -c(Absent, NAICS)))
+
+YPS=d.learn$Absent
+
+amounts <- c(0.00001, 0.0001, 0.001, 1, 10, 100) 
+
+#### WILL RUN FOR HOURS #####
+#for (i in 1:length(amounts)) {
+  
+  # fit model using training set
+  #model_scaled <- ksvm(XPS,
+                       #as.factor(YPS),
+                       #type = "C-svc", # Use C-classification method
+                       #kernel = 'rbfdot', 
+                       #C = amounts[i],
+                       #scaled=FALSE)
+  
+  
+  #  compare models using validation set
+  #data_svm <-  d.valid %>% mutate(pred = predict(model_scaled,select(d.valid, predictors), type="response"))
+
+  #t<-xtabs(~Absent + pred, data = data_svm)
+  #confusionMatrix(t)
+  #print(paste('C value =',amounts[i]))
+  #print(t)
+#}
+
+
+#re-fitting at c=0.00001
+model_scaled <- ksvm(XPS,
+                       as.factor(YPS),
+                       type = "C-svc", # Use C-classification method
+                       kernel = 'rbfdot', 
+                       C =0.00001,
+                       scaled=FALSE)
+
+data_svm <-  d.valid %>% mutate(pred = predict(model_scaled,select(d.valid, predictors), type="response"))
+
+t<-xtabs(~Absent + pred, data = data_svm)
+confusionMatrix(t)
+print(t)
+
+accuracy<-(t[1,1]+t[2,2])/sum(t)
+accuracy
+
+```
+
+Test set with logistic regression
+```{r}
+testprediction<-predict(mod_lasso, d.test, type='response')
+
+d.test_reg<- d.test %>% mutate(d.test, pred_prob = testprediction)
+
+d.test_reg<- d.test_reg %>% mutate(d.test_reg, pred_outcome= ifelse(pred_prob>best_thresh, 1, 0))
+
+t<-xtabs(~Absent + pred_outcome, data = d.test_reg)
+t
+#we want to optimize the amount of 1,1 s 
+#as it stands, we correctly identify absent individuals 145/(134+145)
+
+totaccuracy<-(t[1,1]+t[2,2])/sum(t)
+totaccuracy
+
+absence_prediction_acc<-t[2,2]/(t[2,2]+t[2,1])
+absence_prediction_acc
+```
+
